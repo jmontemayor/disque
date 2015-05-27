@@ -177,6 +177,7 @@ job *createJob(char *id, int state, int ttl) {
 
     j->queue = NULL;
     j->state = state;
+    j->gc_retry = 0;
     j->flags = 0;
     j->body = NULL;
     j->nodes_delivered = dictCreate(&clusterNodesDictType,NULL);
@@ -598,7 +599,7 @@ sds serializeJob(sds jobs, job *j, int sertype) {
     p = msg + 4 + JOB_STRUCT_SER_LEN;
 
     /* Queue name is 4 bytes prefixed len in little endian + actual bytes. */
-    p = serializeSdsString(p,j->queue->ptr);
+    p = serializeSdsString(p,j->queue ? j->queue->ptr : NULL);
 
     /* Body is 4 bytes prefixed len in little endian + actual bytes. */
     p = serializeSdsString(p,j->body);
@@ -919,7 +920,7 @@ void addReplyJobID(client *c, job *j) {
  * copies from other nodes), to avoid non acknowledged jobs to be active
  * when possible. */
 void jobReplicationAchieved(job *j) {
-    serverLog(DISQUE_WARNING,"Replication ACHIEVED %.48s",j->id);
+    serverLog(DISQUE_VERBOSE,"Replication ACHIEVED %.48s",j->id);
 
     /* Change the job state to active. This is critical to avoid the job
      * will be freed by unblockClient() if found still in the old state. */

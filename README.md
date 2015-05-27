@@ -1,4 +1,4 @@
-![](https://travis-ci.org/antirez/disque.svg)
+[![Build Status](https://travis-ci.org/antirez/disque.svg)](https://travis-ci.org/antirez/disque)
 
 Disque, an in-memory, distributed job queue
 ===
@@ -106,7 +106,7 @@ this message less likely.
 However the alternative **fast ack**, while less reliable, is much faster
 and invovles exchanging less messages. This is how a fast acknowledge works:
 
-1. The client sends ACKJOB to one node.
+1. The client sends `FASTACK` to one node.
 2. The node evicts the job and sends a best effort DELJOB to all the nodes that may have a copy, or to all the cluster if the node was not aware of the job.
 
 If during a fast acknowledge a node having a copy of the message is not
@@ -142,7 +142,7 @@ is possible.
 
 Even when running memory-only, Disque is able to dump its memory on disk and reload from disk on controlled restarts, for example in order to upgrade the software.
 
-This is how to perform a controlled restart, that works whatever AOF is enabled
+This is how to perform a controlled restart, that works whether AOF is enabled
 or not:
 
 1. CONFIG SET aof-enqueue-jobs-once yes
@@ -277,6 +277,43 @@ network is well connected and there are no node failures, this is equivalent to
 is more likely that fast acknowledges will result into multiple deliveries of
 the same messages.
 
+    WORKING jobid
+
+Claims to be still working with the specified job, and asks Disque to postpone
+the next time it will deliver again the job. The next delivery is postponed
+for the job retry time, however the command works in a **best effort** way
+since there is no way to guarantee during failures that another node in a
+different network partition is performing a delivery of the same job.
+
+Another limitation of the `WORKING` command is that it cannot be sent to
+nodes not knowing about this particular job. In such a case the command replies
+with a `NOJOB` error. Similarly if the job is already acknowledged an error
+is returned.
+
+Note that the `WORKING` command is refused by Disque nodes if 50% of the job
+time to live has already elapsed. This limitation makes Disque safer since
+usually the *retry* time is much smaller than the time to live of a job, so
+it can't happen that a set of broken workers monopolize a job with `WORKING`
+never processing it. After 50% of the TTL elapsed, the job will be delivered
+to other workers anyway.
+
+Note that `WORKING` returns the number of seconds you (likely) postponed the
+message visiblity for other workers (the command basically returns the
+*retry* time of the job), so the worker should make sure to send the next
+`WORKING` command before this time elapses. Moreover a worker that may want
+to use such an iterface may fetch the retry value with the `SHOW` command
+when starting to process a message, or may simply send a `WORKING` command
+ASAP, like in the following example (in pseudo code):
+
+    retry = WORKING(jobid)
+    RESET timer
+    WHILE ... work with the job still not finished ...
+        IF timer reached 80% of the retry time
+            WORKING(jobid)
+            RESET timer
+        END
+    END
+
 Other commands
 ===
 
@@ -318,8 +355,28 @@ no `DELJOB` cluster bus message is sent to other nodes.
     SHOW <job-id>
 Describe the job.
 
-    SCAN <job|queue> <cursor> [STATE ...] [COUNT ...] [MAXIDLE ...] (TODO)
-Iterate job IDs.
+    QSCAN [COUNT <count>] [BUSYLOOP] [MINLEN <len>]
+          [MAXLEN <len>] [IMPORTRATE <rate>]
+The command provides an interface to iterate all the existing queues in
+the local node, providing a cursor in the form of an integer that is passed
+to the next command invocation. During the first call cursor must be 0,
+in the next calls the cursor returned in the previous call is used in the
+next. The iterator guarantees to return all the elements but may return
+duplicated elements.
+
+Options:
+
+* `COUNT <count>` An hit about how much work to do per iteration.
+* `BUSYLOOP` Block and return all the elements in a busy loop.
+* `MINLEN <count>` Don't return elements with less than count jobs queued.
+* `MAXLEN <count>`Don't return elements with more than count jobs queued.
+* `IMPORTRATE <rate>` Only return elements with an job import rate (from other nodes) `>=` rate.
+
+The cursor argument can be in any place, the first non matching option
+that has valid cursor form of an usigned number will be sensed as a valid
+cursor.
+
+    JSCAN (TODO: jobs iterator similar to QSCAN).
 
 Client libraries
 ===
@@ -330,7 +387,7 @@ While a vanilla Redis client may work well with Disque, clients should optionall
 
 1. The client should be given a number of IP addresses and ports where nodes are located. The client should select random nodes and should try to connect until one available is found.
 2. On a successful connection the `HELLO` command should be used in order to retrieve the Node ID and other potentially useful information (server version, number of nodes).
-3. If a consumer sees an high message rate received from foreign nodes, it may optionally have logic in order to retrieve messages directly from the nodes where producers are producing the messages for a given topic. The consumer can easily check the source of the messages by checking the Node ID prefix in the messages IDs.
+3. If a consumer sees a high message rate received from foreign nodes, it may optionally have logic in order to retrieve messages directly from the nodes where producers are producing the messages for a given topic. The consumer can easily check the source of the messages by checking the Node ID prefix in the messages IDs.
 
 This way producers and consumers will eventually try to minimize nodes messages exchanges whenever possible.
 
@@ -341,6 +398,10 @@ API on top of Disque:
 *C++*
 
 - [disque C++ client](https://github.com/zhengshuxin/acl/tree/master/lib_acl_cpp/samples/disque)
+
+*Elixir*
+
+- [exdisque](https://github.com/mosic/exdisque)
 
 *Erlang*
 
@@ -362,11 +423,16 @@ API on top of Disque:
 - [disque.js](https://www.npmjs.com/package/disque.js)
 - [thunk-disque](https://github.com/thunks/thunk-disque)
 
+*Perl*
+
+- [perl-disque](https://github.com/lovelle/perl-disque)
+
 *PHP*
 
 - [phpque](https://github.com/s12v/phpque) (PHP/HHVM)
 - [disque-php](https://github.com/mariano/disque-php) ([Composer/Packagist](https://packagist.org/packages/mariano/disque-php))
 - [disque-client-php](https://github.com/mavimo/disque-client-php) ([Composer/Packagist](https://packagist.org/packages/mavimo/disque-client))
+- [phloppy](https://github.com/0x20h/phloppy) ([Composer/Packagist](https://packagist.org/packages/0x20h/phloppy))
 
 *Python*
 
@@ -425,15 +491,15 @@ Cluster messages related to jobs replication and queueing
 * ADDJOB: ask the receiver to replicate a job, that is, to add a copy of the job among the registered jobs in the target node. When a job is accepted, the receiver replies with GOTJOB to the sender. A job may not be accepted if the receiving node is near out of memory. In this case GOTJOB is not send and the message discarded.
 * GOTJOB: The reply to ADDJOB to confirm the job was replicated.
 * ENQUEUE: Ask a node to put a given job into its queue. This message is used when a job is created by a node that does not want to take a copy, so it asks another node (among the ones that acknowledged the job replication) to queue it for the first time. If this message is lost, after the retry time some node will try to re-queue the message, unless retry is set to zero.
-* WILLQUEUE: This message is send 500 milliseconds before a job is re-queued to all the nodes that may have a copy of the message, according to the sender table. If some of the receivers already have the job queued, they'll reply with QUEUED in order to prevent the sender to queue the job again (avoid multiple delivery when possible).
+* WILLQUEUE: This message is sent 500 milliseconds before a job is re-queued to all the nodes that may have a copy of the message, according to the sender table. If some of the receivers already have the job queued, they'll reply with QUEUED in order to prevent the sender to queue the job again (avoid multiple delivery when possible).
 * QUEUED: When a node re-queue a job, it sends QUEUED to all the nodes that may have a copy of the message, so that the other nodes will update the time at which they'll retry to queue the job. Moreover every node that already has the same job in queue, but with a node ID which is lexicographically smaller than the sending node, will de-queue the message in order to best-effort de-dup messages that may be queued into multiple nodes at the same time.
 
 Cluster messages related to ACKs propagation and garbage collection
 ---
 
 * SETACK: This message is sent to force a node to mark a job as successfully delivered (acknowledged by the worker): the job will no longer be considered active, and will never be re-queued by the receiving node. Also SETACK is send to the sender if the receiver of QUEUED or WILLQUEUE message has the same job marked as acknowledged (successfully delivered) already.
-* GOTACK: This message is sent in order to acknowledge a SETACK message. The receiver can mark a given node that may have a copy of a job, as informed about the fact that the job was acknowledged by the worker. Nodes delete (garbage collect) a message cluster wide when they believe all the jobs are informed about the fact the job was acknowledged.
-* DELJOB: Ask the receiver to remove a job. Is only sent in order to perform garbage collection of jobs by nodes that are sure the job was already delivered correctly. Usually the node sending DELJOB only does that when its sure that all the nodes that may have a copy of the message already marked the message ad delivered, however after some time the job GC may be performed anyway, in order to reclaim memory, and in that case, an otherwise avoidable multiple delivery of a job may happen.
+* GOTACK: This message is sent in order to acknowledge a SETACK message. The receiver can mark a given node that may have a copy of a job, as informed about the fact that the job was acknowledged by the worker. Nodes delete (garbage collect) a message cluster wide when they believe all the nodes that may have a copy are informed about the fact the job was acknowledged.
+* DELJOB: Ask the receiver to remove a job. Is only sent in order to perform garbage collection of jobs by nodes that are sure the job was already delivered correctly. Usually the node sending DELJOB only does that when its sure that all the nodes that may have a copy of the message already marked the message ad delivered, however after some time the job GC may be performed anyway, in order to reclaim memory, and in that case, an otherwise avoidable multiple delivery of a job may happen. The DELJOB message is also used in order to implement *fast acknowledges*.
 
 Cluster messages related to nodes federation
 ---
@@ -728,10 +794,24 @@ In order to minimize the latency, `NEEDJOBS` messages are not trottled at all wh
 
 For more information, please refer to the file `queue.c`, especially the function `needJobsForQueue` and its callers.
 
+Are messages re-enqueued in the queue tail or head or what?
+---
+
+Messages are put into the queue according to their *creation time* attribute. This means that they are enqueued in a best effort order in the local node queue. Messages that need to be put back into the queue again because their delivery failed are usually (but not always) older than messages already in queue, so they'll likely be among the first to be delivered to workers.
+
 What Disque means?
 ---
 
 DIStributed QUEue but is also a joke with "dis" as negation (like in *dis*order) of the strict concept of queue, since Disque is not able to guarantee the strict ordering you expect from something called *queue*. And because of this tradeof it gains many other interesting things.
+
+Community: how to get help and how to help
+===
+
+Get in touch with us in one of the following ways:
+
+1. Join the `#disque` IRC channel at **irc.freenode.net**.
+2. Post on Stack Overflow using the `disque` tag.
+3. Create an Issue or Pull request if you wish.
 
 Thanks
 ===
